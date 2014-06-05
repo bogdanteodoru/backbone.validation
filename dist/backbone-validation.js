@@ -123,7 +123,8 @@ Backbone.Validation = (function(_){
                     memo.push({
                         fn: defaultValidators[validator],
                         val: attrValidation[validator],
-                        msg: attrValidation.msg
+                        msg: attrValidation.msg,
+                        async: attrValidation.async || false
                     });
                 });
                 return memo;
@@ -134,200 +135,117 @@ Backbone.Validation = (function(_){
         // for that attribute. If one or more errors are found,
         // the first error message is returned.
         // If the attribute is valid, an empty string is returned.
-        var validateAttr = function (masterDeferred, model, attr, value, computed) {
+        var validateAttr = function(model, attr, value, computed) {
+            // Reduces the array of validators to an error message by
+            // applying all the validators and returning the first error
+            // message, if any.
+            return _.reduce(getValidators(model, attr), function(memo, validator){
 
-            var validators = getValidators(model, attr);
+                if (validator.async) {
+                    if (validator.fn) {
+                        var asyncFnBinded = validator.val.bind(model);
 
-            if (validators.length === 0) {
-                masterDeferred.resolve();
-            } else {
-                var invokeValidator = function (validator) {
-                    var result = $.Deferred();
+                        asyncFnBinded(value).done(function(){
 
-                    // Create a promise for our deferred validation so that
-                    // we can properly bind to the resolve / reject handlers
-                    // for the validation step.
-                    result.promise().then(
-                        function (/* Resolve arguments. */) {
-
-                            // This validation passed. Now, let's see if we
-                            // have another validation to execute.
-                            var nextValidation = validators.shift();
-
-                            // Check for a next validation.
-                            if (nextValidation) {
-
-                                // Recusively invoke the validation. When we
-                                // do this, we want to pass-through the
-                                // previous validation result in case it is
-                                // needed by the next step.
-                                return(
-                                    invokeValidator(nextValidation)
-                                    );
-
+                            if(validator.async.callbackOk) {
+                                return validator.async.callbackOk(null, attr, validator.msg)
                             }
 
-                            // No more validation steps are provided. We can
-                            // therefore consider the validation process to
-                            // be resolved. Resolve the master deferred.
-                            masterDeferred.resolve();
+                            return true
 
-                        },
-                        function (errorMessage) {
+                        }).fail(function(){
 
-                            // Reject the master deferred.
-                            masterDeferred.reject(validator.msg);
+                            if(validator.async.callbackFail) {
+                                return validator.async.callbackFail(null, attr, validator.msg)
+                            }
 
-                        }
-                    );
+                            return false
 
-                    // While the validation is intended to be asynchronous,
-                    // let's catch any synchronous errors.
-                    try {
-
-                        var ctx = _.extend({}, formatFunctions, defaultValidators);
-
-                        // Call the validator.
-                        validator.fn.call(ctx, result, value, attr, validator.val, model, computed);
-
-                    } catch (syncError) {
-
-                        // If there was a synchronous error in the callback
-                        // that was not caught, let's return a 500 server
-                        // response error.
-                        masterDeferred.reject(validator.msg);
+                        });
 
                     }
+                } else {
+                    // Pass the format functions plus the default
+                    // validators as the context to the validator
+                    var ctx = _.extend({}, formatFunctions, defaultValidators),
+                        result = validator.fn.call(ctx, value, attr, validator.val, model, computed);
 
-                };
-
-                // Invoke the first validator.
-                invokeValidator(validators.shift());
-            }
-
-            return( masterDeferred.promise() );
-
-
-            // Return the promise of the master deferred object.
+                    if(result === false || memo === false) {
+                        return false;
+                    }
+                    if (result && !memo) {
+                        return _.result(validator, 'msg') || result;
+                    }
+                    return memo;
+                }
+            }, '');
         };
-
 
         // Loops through the model's attributes and validates them all.
         // Returns and object containing names of invalid attributes
         // as well as error messages.
-        var validateModel = function (model, attrs) {
-
-            var masterDeferred = $.Deferred();
-
+        var validateModel = function(model, attrs) {
             var error,
                 invalidAttrs = {},
                 isValid = true,
                 computed = _.clone(attrs),
                 flattened = flatten(attrs);
 
-            // Convert an object into a list of [key, value] pairs.
-            var pairs = _.pairs(flattened);
+            _.each(flattened, function(val, attr) {
+                error = validateAttr(model, attr, val, computed);
+                if (error) {
+                    invalidAttrs[attr] = error;
+                    isValid = false;
+                }
+            });
 
-            var invokeModel = function (pair) {
-                var attr = pair[0];
-                var value = pair[1];
-                var result = $.Deferred();
-
-                // Create a promise for our deferred validation so that
-                // we can properly bind to the resolve / reject handlers
-                // for the validation step.
-                result.promise().then(
-                    function (/* Resolve arguments. */) {
-
-                        var nextPair = pairs.shift();
-
-                        // Check for a next validation.
-                        if (nextPair) {
-
-                            // Recusively invoke the validation. When we
-                            // do this, we want to pass-through the
-                            // previous validation result in case it is
-                            // needed by the next step.
-                            return(
-                                invokeModel(nextPair)
-                                );
-
-                        }
-
-                        // No more validation steps are provided. We can
-                        // therefore consider the validation process to
-                        // be resolved. Resolve the master deferred.
-                        masterDeferred.resolve({
-                            invalidAttrs: invalidAttrs,
-                            isValid: isValid
-                        });
-
-                    },
-                    function (errorMessage) {
-
-                        invalidAttrs[attr] = errorMessage;
-                        isValid = false;
-
-                        var nextPair = pairs.shift();
-
-                        // Check for a next validation.
-                        if (nextPair) {
-
-                            // Recusively invoke the validation. When we
-                            // do this, we want to pass-through the
-                            // previous validation result in case it is
-                            // needed by the next step.
-                            return(
-                                invokeModel(nextPair)
-                                );
-
-                        }
-
-                        // No more validation steps are provided. We can
-                        // therefore consider the validation process to
-                        // be resolved. Resolve the master deferred.
-                        masterDeferred.resolve({
-                            invalidAttrs: invalidAttrs,
-                            isValid: isValid
-                        });
-
-                    }
-                );
-
-                validateAttr(result, model, attr, value, computed);
-
+            return {
+                invalidAttrs: invalidAttrs,
+                isValid: isValid
             };
-
-            invokeModel(pairs.shift());
-
-            return masterDeferred.promise();
         };
 
         // Contains the methods that are mixed in on the model when binding
-        var mixin = function (view, options) {
+        var mixin = function(view, options) {
             return {
 
-                // Check whether or not a value passes validation
-                // without updating the model
-                preValidate: function (attr, value) {
-                    return validateAttr($.Deferred(),this, attr, value, _.extend({}, this.attributes));
+                // Check whether or not a value, or a hash of values
+                // passes validation without updating the model
+                preValidate: function(attr, value) {
+                    var self = this,
+                        result = {},
+                        error;
+
+                    if(_.isObject(attr)){
+                        _.each(attr, function(value, key) {
+                            error = self.preValidate(key, value);
+                            if(error){
+                                result[key] = error;
+                            }
+                        });
+
+                        return _.isEmpty(result) ? undefined : result;
+                    }
+                    else {
+                        return validateAttr(this, attr, value, _.extend({}, this.attributes));
+                    }
                 },
 
                 // Check to see if an attribute, an array of attributes or the
                 // entire model is valid. Passing true will force a validation
                 // of the model.
-                isValid: function (option) {
+                isValid: function(option) {
                     var flattened = flatten(_.extend({}, this.attributes));
 
-                    if (_.isString(option)) {
+                    if(_.isString(option)){
                         return !validateAttr(this, option, flattened[option], _.extend({}, this.attributes));
                     }
-                    if (_.isArray(option)) {
-                        return _.reduce(option, function (memo, attr) {
+                    if(_.isArray(option)){
+                        return _.reduce(option, function(memo, attr) {
                             return memo && !validateAttr(this, attr, flattened[attr], _.extend({}, this.attributes));
                         }, true, this);
                     }
-                    if (option === true) {
+                    if(option === true) {
                         this.validate();
                     }
                     return this.validation ? this._isValid : true;
@@ -336,70 +254,55 @@ Backbone.Validation = (function(_){
                 // This is called by Backbone when it needs to perform validation.
                 // You can call it manually without any parameters to validate the
                 // entire model.
-                validate: function (attrs, setOptions) {
+                validate: function(attrs, setOptions){
                     var model = this,
                         validateAll = !attrs,
                         opt = _.extend({}, options, setOptions),
                         validatedAttrs = getValidatedAttrs(model),
                         allAttrs = _.extend({}, validatedAttrs, model.attributes, attrs),
-                        changedAttrs = flatten(attrs || allAttrs);
+                        changedAttrs = flatten(attrs || allAttrs),
 
-                    var deferred = $.Deferred();
+                        result = validateModel(model, allAttrs);
 
-                    validateModel(model, allAttrs).then(
-                        function(result) {
-                            model._isValid = result.isValid;
+                    model._isValid = result.isValid;
 
-                            // After validation is performed, loop through all changed attributes
-                            // and call the valid callbacks so the view is updated.
-                            _.each(validatedAttrs, function (val, attr) {
-                                var invalid = result.invalidAttrs.hasOwnProperty(attr);
-                                if (!invalid) {
-                                    opt.valid(view, attr, opt.selector);
-                                }
-                            });
-
-                            // After validation is performed, loop through all changed attributes
-                            // and call the invalid callback so the view is updated.
-                            _.each(validatedAttrs, function (val, attr) {
-                                var invalid = result.invalidAttrs.hasOwnProperty(attr),
-                                    changed = changedAttrs.hasOwnProperty(attr);
-
-                                if (invalid && (changed || validateAll)) {
-                                    opt.invalid(view, attr, result.invalidAttrs[attr], opt.selector);
-                                }
-                            });
-
-                            // Trigger validated events.
-                            // Need to defer this so the model is actually updated before
-                            // the event is triggered.
-                            _.defer(function () {
-                                model.trigger('validated', model._isValid, model, result.invalidAttrs);
-                                model.trigger('validated:' + (model._isValid ? 'valid' : 'invalid'), model, result.invalidAttrs);
-                            });
-
-                            // Return any error messages to Backbone, unless the forceUpdate flag is set.
-                            // Then we do not return anything and fools Backbone to believe the validation was
-                            // a success. That way Backbone will update the model regardless.
-                            if (!opt.forceUpdate && _.intersection(_.keys(result.invalidAttrs), _.keys(changedAttrs)).length > 0) {
-                                return result.invalidAttrs;
-                            }
-
-                            if (model._isValid) {
-                                deferred.resolve();
-                            } else {
-                                deferred.reject();
-                            }
-
+                    // After validation is performed, loop through all validated attributes
+                    // and call the valid callbacks so the view is updated.
+                    _.each(validatedAttrs, function(val, attr){
+                        var invalid = result.invalidAttrs.hasOwnProperty(attr);
+                        if(!invalid){
+                            opt.valid(view, attr, opt.selector);
                         }
-                    );
+                    });
 
-                    return deferred.promise();
+                    // After validation is performed, loop through all validated and changed attributes
+                    // and call the invalid callback so the view is updated.
+                    _.each(validatedAttrs, function(val, attr){
+                        var invalid = result.invalidAttrs.hasOwnProperty(attr),
+                            changed = changedAttrs.hasOwnProperty(attr);
 
+                        if(invalid && (changed || validateAll)){
+                            opt.invalid(view, attr, result.invalidAttrs[attr], opt.selector);
+                        }
+                    });
+
+                    // Trigger validated events.
+                    // Need to defer this so the model is actually updated before
+                    // the event is triggered.
+                    _.defer(function() {
+                        model.trigger('validated', model._isValid, model, result.invalidAttrs);
+                        model.trigger('validated:' + (model._isValid ? 'valid' : 'invalid'), model, result.invalidAttrs);
+                    });
+
+                    // Return any error messages to Backbone, unless the forceUpdate flag is set.
+                    // Then we do not return anything and fools Backbone to believe the validation was
+                    // a success. That way Backbone will update the model regardless.
+                    if (!opt.forceUpdate && _.intersection(_.keys(result.invalidAttrs), _.keys(changedAttrs)).length > 0) {
+                        return result.invalidAttrs;
+                    }
                 }
             };
         };
-
 
         // Helper to mix in validation on a model
         var bindModel = function(view, model, options) {
