@@ -281,6 +281,9 @@ MyModel = Backbone.Model.extend({
       async: {
         // simply add async on validators you want to be async
         callbackOk: function(view, attr, msg) {
+          return Backbone.Validation.callbacks.valid(view, attr, msg);
+        }
+        callbackFail: function(view, attr, msg) {
           return Backbone.Validation.callbacks.invalid(view, attr, msg);
         }
       },
