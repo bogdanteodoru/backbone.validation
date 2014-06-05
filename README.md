@@ -269,6 +269,28 @@ var errorMessage = model.preValidate('attributeName', 'Value');
 var errors = model.preValidate({name: 'value', email: 'foo@example.com');
 ```
 
+### Async Validation
+```js
+MyModel = Backbone.Model.extend({
+  validation: {
+    email: {
+      fn: function(value) {
+        // this should return a promise.
+        return this.checkEmail(value);
+      },
+      async: {
+        // simply add async on validators you want to be async
+        callbackOk: function(view, attr, msg) {
+          return Backbone.Validation.callbacks.invalid(view, attr, msg);
+        }
+      },
+      msg: "E-mail already exists."
+    }
+  }
+});
+
+```
+
 ## Configuration
 
 ### Callbacks
